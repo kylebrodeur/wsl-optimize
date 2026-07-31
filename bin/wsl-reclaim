@@ -27,9 +27,27 @@ esac; done
 # Shared primitives (platform detection, guards, safe-tier reclaim). Vendored
 # from agent-machine-lib; refresh with `make vendor-lib`.
 AM_TOOL=wsl-reclaim
-# shellcheck source=../lib/common.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh" 2>/dev/null \
-  || . "$HOME/.local/lib/wsl-optimize/common.sh"
+# Locate lib/common.sh. This tool is vendored into several repos that each
+# install to their own libdir, so probe the known locations rather than assuming
+# one. $AM_LIB overrides everything.
+_am_find_lib() {
+  local self_dir; self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local c
+  for c in "${AM_LIB:-}" \
+           "$self_dir/../lib/common.sh" \
+           "$HOME/.local/lib/agent-machine/common.sh" \
+           "$HOME/.local/lib/wsl-optimize/common.sh" \
+           "$HOME/.local/lib/mac-optimize/common.sh"; do
+    [ -n "$c" ] && [ -r "$c" ] && { printf '%s\n' "$c"; return 0; }
+  done
+  return 1
+}
+_AM_LIB_PATH="$(_am_find_lib)" || {
+  printf '%s: cannot find lib/common.sh (set $AM_LIB to its path)\n' "${0##*/}" >&2
+  exit 1
+}
+# shellcheck source=/dev/null
+. "$_AM_LIB_PATH"
 
 KEEP_DAYS="${KEEP_DAYS:-30}"
 KEEP_RECENT="${KEEP_RECENT:-5}"
