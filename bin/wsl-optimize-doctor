@@ -14,7 +14,7 @@ info(){ printf "  \033[2m·\033[0m %s\n" "$1"; }
 hdr(){  printf "\n\033[1m%s\033[0m\n" "$1"; }
 
 hdr "Tools on PATH"
-for t in wslreport wsl-reclaim capmem wsl-optimize-doctor; do
+for t in wslreport wsl-reclaim wsl-compact capmem worktree-audit wsl-optimize-doctor; do
   p="$(command -v "$t" 2>/dev/null)"
   { [ -n "$p" ] && [ -x "$p" ]; } && ok "$t → $p" \
     || no "$t not found — run 'make install' (and put ~/.local/bin on PATH)"
@@ -121,6 +121,32 @@ for d in "${_pd[@]}"; do
   for f in "$d"/*; do [ -L "$f" ] && [ ! -e "$f" ] && dang=$((dang+1)); done 2>/dev/null
 done
 [ "$dang" -eq 0 ] && ok "no dangling symlinks on PATH" || wr "$dang dangling symlink(s) on PATH"
+
+# ── MCP config integrity ─────────────────────────────────────────────────────
+# MCP servers are launched by the editor, so a config pointing at a path that no
+# longer exists fails silently — the server just never starts. One of these sat
+# broken for four days here after a Node version-manager tree was wiped, with no
+# error surfaced anywhere. Read-only: this only stats paths.
+hdr "MCP server configs"
+mcp_found=0
+for f in "$HOME/.vscode-server/data/User/mcp.json" \
+         /mnt/c/Users/*/AppData/Roaming/Code/User/mcp.json \
+         "$HOME/.config/Code/User/mcp.json"; do
+  [ -f "$f" ] || continue
+  mcp_found=1
+  label="${f/#$HOME/\~}"
+  bad=0
+  # Pull quoted absolute POSIX paths out of the JSON and stat them. Values that
+  # are colon-joined PATH lists are split first, and glob/variable placeholders
+  # are skipped since they are resolved by the launcher, not by us.
+  while IFS= read -r p; do
+    case "$p" in *'*'*|*'$'*|*'{'*) continue ;; esac
+    [ -e "$p" ] || { no "$label → missing: $p"; bad=$((bad+1)); }
+  done < <(grep -oE '"/[^"]+"' "$f" 2>/dev/null | tr -d '"' | tr ':' '\n' \
+             | grep -E '^/' | sort -u)
+  [ "$bad" -eq 0 ] && ok "$label — all referenced paths exist"
+done
+[ "$mcp_found" -eq 0 ] && info "no MCP configs found"
 
 # ── PATH hygiene ─────────────────────────────────────────────────────────────
 hdr "PATH hygiene"

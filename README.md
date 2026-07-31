@@ -50,6 +50,7 @@ wsl-compact           # how much is trapped in the vhdx, and how to get it back
 | **`wsl-reclaim`** | Two tiers. **Safe** (default) clears caches the owning tool rebuilds on demand — safe *by construction*. **`--deep`** prunes stale agent state only with *evidence* it's unused, behind `--dry-run`, an allowlist, `lsof` guards, and a keep-newest floor. |
 | **`wsl-compact`** | Measures the space trapped in the `ext4.vhdx` and prints the exact Windows-side commands to reclaim it. **Guided, never automatic** — compaction requires `wsl --shutdown`, which kills every running agent. |
 | **`capmem`** | Runs a command inside a memory-capped systemd scope, so a runaway fleet is killed by its own cgroup instead of taking the VM down. `capmem --status` shows limits and live scopes. |
+| **`worktree-audit`** | Finds stray git worktrees and classifies each **SAFE** (clean *and* every commit reachable from another ref) or **REVIEW** (dirty, or holding commits that exist nowhere else). `--prune` removes SAFE ones; `--backup` archives REVIEW ones to verified git bundles so they *become* safe to prune. Shared with `mac-optimize` via `agent-machine-lib`. |
 | **`memguard`** | The systemd-timer watcher (a `diskguard` analog). Every 30 min: on combined memory+swap pressure or low disk it runs the **safe** reclaim, logs, and posts a Windows toast. Never kills a process, never prunes unattended. |
 
 ## How it works
@@ -72,6 +73,7 @@ Four principles, in order of trust — the same ladder as `mac-optimize`:
 | `wsl-compact [--json]` | Trapped-space report + Windows compaction commands. |
 | `capmem <cmd>` / `capmem --status` | Run capped / inspect limits and live scopes. |
 | `memguard --once -v` | Run one guard cycle by hand. |
+| `worktree-audit [--prune] [--backup]` | Audit / reclaim / archive stray git worktrees. |
 
 | Var | Default | Meaning |
 |---|---|---|
@@ -158,12 +160,8 @@ These solve adjacent problems well; this repo defers to them rather than shippin
 |---|---|
 | [`agent-session-kill`](https://github.com/kylebrodeur/agent-session-kill) | Agent transcript cleanup, done properly: trash-first deletion, protection lists for auth/settings/skills/memory, and coverage of Pi/OMP/Copilot Chat as well as Claude. `wsl-reclaim --deep` **delegates to it when installed** and only falls back to its own conservative pruning otherwise. |
 | [`wsl-gpu-guard`](https://github.com/kylebrodeur/wsl-gpu-guard) | A *third* cause of silent WSL death: on Optimus laptops the dGPU powers off when AC is unplugged, `/dev/dxg` vanishes, and any process holding a CUDA context takes WSL2 down with it. `wsl-optimize-doctor` checks whether it is running and whether earlyoom is configured to protect it. |
-| [`mac-optimize`](https://github.com/kylebrodeur/mac-optimize) | The macOS sibling. Its `worktree-audit` is pure git and runs unmodified here. |
+| [`mac-optimize`](https://github.com/kylebrodeur/mac-optimize) | The macOS sibling. Shares `worktree-audit` and `lib/common.sh` with this repo via `agent-machine-lib`. |
 | [`agent-machine-lib`](https://github.com/kylebrodeur/agent-machine-lib) | The shared bash primitives both this repo and `mac-optimize` vendor. |
-
-## Not included: git worktree auditing
-
-Stray agent worktrees are a real disk sink on WSL too, but the tool for it — `worktree-audit` — is pure git and already solid in [`mac-optimize`](https://github.com/kylebrodeur/mac-optimize). It runs unmodified here. Rather than fork a copy that drifts, install that repo alongside this one if you want it.
 
 ## Background
 
