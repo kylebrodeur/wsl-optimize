@@ -1,12 +1,14 @@
 [Unit]
-Description=Run wsl-optimize memguard at login and every 30 minutes
+Description=Run wsl-optimize memguard shortly after start, then every 30 minutes
 
 [Timer]
-OnStartupSec=2min
+# OnActiveSec is relative to when the TIMER is activated, so the schedule is
+# populated on `enable --now` as well as at boot. OnStartupSec alone is relative
+# to system boot, which leaves a re-enabled timer with no next elapse at all.
+OnActiveSec=2min
 OnUnitActiveSec=30min
-# WSL is frequently suspended; catch up once on resume rather than storming.
-Persistent=true
 AccuracySec=1min
+# Persistent= only affects OnCalendar (realtime) timers; it is a no-op here.
 
 [Install]
 WantedBy=timers.target

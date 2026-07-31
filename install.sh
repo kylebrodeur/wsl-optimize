@@ -46,8 +46,13 @@ done
 
 systemctl --user daemon-reload
 for t in memguard.timer wsl-reclaim.timer; do
-  systemctl --user enable --now "$t" >/dev/null 2>&1 && echo "  enabled $t" \
-    || echo "  WARNING: could not enable $t"
+  # `enable --now` is satisfied by "already running" and will NOT pick up a
+  # changed unit file — the classic way a config edit looks applied but isn't.
+  # Enable for boot, then restart explicitly so re-running the installer
+  # actually applies the new schedule.
+  systemctl --user enable "$t" >/dev/null 2>&1 || { echo "  WARNING: could not enable $t"; continue; }
+  systemctl --user restart "$t" >/dev/null 2>&1 && echo "  enabled + started $t" \
+    || echo "  WARNING: could not start $t"
 done
 
 # Linger keeps the timers running when no login session is open. Not fatal
