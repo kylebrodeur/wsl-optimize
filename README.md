@@ -26,6 +26,27 @@ So the kernel **protects the memory hogs and dismantles the session.** VS Code d
 
 Both have the same shape as the macOS disk problem: **aggregate, invisible, no single culprit.** The design goal is the same too — change the failure from *silent and fatal* to *observable and bounded*.
 
+## Install
+
+**Homebrew** (WSL2 (via Linuxbrew)):
+
+```bash
+brew install kylebrodeur/tap/wsl-optimize
+```
+
+Homebrew installs the tools and the shared library, but does **not** manage the
+scheduled automation (it needs per-user paths). `brew info wsl-optimize` prints the exact
+commands, or use the clone method below to have `install.sh` do it.
+
+**From a clone** — also sets up the automation:
+
+```bash
+git clone https://github.com/kylebrodeur/wsl-optimize.git
+cd wsl-optimize
+make install
+make doctor
+```
+
 ## Quickstart
 
 ```bash
