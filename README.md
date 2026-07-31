@@ -167,6 +167,10 @@ These solve adjacent problems well; this repo defers to them rather than shippin
 
 The WSL2 OOM forensics writeup this grew out of: [Diagnosing a silent WSL2 shutdown](https://gist.github.com/kylebrodeur/68059cbfdc0f4b1d9d483fe466e4de1b).
 
+## Testing
+
+Full clone → install → run → maintain → uninstall verification, with assertions and STOP checks at each step: **[TESTING.md](TESTING.md)**.
+
 ## License
 
 MIT © 2026 Kyle Brodeur
