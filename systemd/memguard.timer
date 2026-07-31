@@ -1,0 +1,12 @@
+[Unit]
+Description=Run wsl-optimize memguard at login and every 30 minutes
+
+[Timer]
+OnStartupSec=2min
+OnUnitActiveSec=30min
+# WSL is frequently suspended; catch up once on resume rather than storming.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

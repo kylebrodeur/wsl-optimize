@@ -1,0 +1,11 @@
+[Unit]
+Description=wsl-optimize weekly safe cache reclaim
+Documentation=https://github.com/kylebrodeur/wsl-optimize
+
+[Service]
+Type=oneshot
+Environment=PATH=__PATH__
+# Safe tier ONLY. --deep is never run unattended, by design.
+ExecStart=__HOME__/.local/bin/wsl-reclaim --quiet
+MemoryMax=1G
+Nice=15

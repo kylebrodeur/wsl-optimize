@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# wsl-compact — measure and reclaim the space trapped inside the ext4.vhdx.
+#
+# The WSL2 failure macOS has no equivalent of: the virtual disk only ever GROWS.
+# Deleting 20 GB inside WSL frees 20 GB to `df`, and returns exactly nothing to
+# Windows. So "I have plenty of room" inside can coexist with a full host disk.
+#
+# This tool is GUIDED, never automatic. Compaction requires the distro to be
+# shut down, which necessarily kills the shell you are running this from — so it
+# prints the exact commands to run from Windows instead of pulling the rug.
+#
+# Usage: wsl-compact [--json]
+set -uo pipefail
+
+PS=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+JSON=0; [ "${1:-}" = "--json" ] && JSON=1
+
+ps1(){ "$PS" -NoProfile -Command "$1" 2>/dev/null | tr -d '\r'; }
+die(){ printf "\033[31m%s\033[0m\n" "$1" >&2; exit 1; }
+
+[ -x "$PS" ] || die "Windows interop unavailable — run this from inside WSL with interop enabled."
+
+DISTRO="${WSL_DISTRO_NAME:-}"
+[ -n "$DISTRO" ] || die "WSL_DISTRO_NAME is unset — cannot identify this distro."
+
+# Registry is authoritative for where the vhdx actually lives (it is often moved
+# off C:). Strip the \\?\ long-path prefix Windows sometimes stores.
+BASE=$(ps1 "Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' | ForEach-Object { \$p=Get-ItemProperty \$_.PSPath; if (\$p.DistributionName -eq '$DISTRO') { \$p.BasePath -replace '^\\\\\\\\\?\\\\','' } }")
+[ -n "$BASE" ] || die "Could not find the BasePath for '$DISTRO' in the registry."
+VHD="$BASE\\ext4.vhdx"
+
+SIZE_GB=$(ps1 "if (Test-Path '$VHD') { '{0:N1}' -f ((Get-Item '$VHD').Length/1GB) }")
+[ -n "$SIZE_GB" ] || die "ext4.vhdx not found at: $VHD"
+
+USED_GB=$(df -BG / | awk 'NR==2{gsub("G","",$3); print $3}')
+FREE_GB=$(df -BG / | awk 'NR==2{gsub("G","",$4); print $4}')
+SLACK=$(awk -v a="$SIZE_GB" -v b="$USED_GB" 'BEGIN{printf "%.1f", a-b}')
+
+# wsl.exe emits UTF-16, so grepping its --help from bash silently finds nothing.
+# Gate on the reported version instead: --set-sparse landed in WSL 2.0.
+WSLVER=$(/mnt/c/Windows/System32/wsl.exe --version 2>/dev/null | tr -d '\r\0' \
+         | awk -F': *' '/^WSL version/{print $2; exit}')
+SPARSE=0
+[ -n "$WSLVER" ] && awk -v v="${WSLVER%%.*}" 'BEGIN{exit !(v+0 >= 2)}' && SPARSE=1
+
+if [ "$JSON" -eq 1 ]; then
+  printf '{"distro":"%s","vhdx":"%s","size_gb":%s,"used_gb":%s,"slack_gb":%s}\n' \
+    "$DISTRO" "${VHD//\\/\\\\}" "$SIZE_GB" "$USED_GB" "$SLACK"
+  exit 0
+fi
+
+printf "\033[1mwsl-compact\033[0m  %s\n\n" "$DISTRO"
+printf "  %-22s %s\n" "vhdx"          "$VHD"
+printf "  %-22s %s GB\n" "size on disk" "$SIZE_GB"
+printf "  %-22s %s GB\n" "used inside"  "$USED_GB"
+printf "  %-22s %s GB free inside\n" "" "$FREE_GB"
+printf "  \033[1m%-22s %s GB\033[0m\n" "trapped (reclaimable)" "$SLACK"
+
+if awk -v s="$SLACK" 'BEGIN{exit !(s < 5)}'; then
+  printf "\n\033[32m✓ Little trapped space — compaction is not worth a restart right now.\033[0m\n"
+  exit 0
+fi
+
+cat <<EOF
+
+Compaction requires the distro to be SHUT DOWN, which will close this shell,
+your editor's WSL connection, and every running agent. Save work first.
+
+Run these from a Windows PowerShell prompt (not from here):
+
+  # 1. Let future deletions return space automatically (one-time, needs shutdown)
+  wsl --manage $DISTRO --set-sparse true
+
+  # 2. Shut everything down
+  wsl --shutdown
+
+  # 3. Compact the existing bloat
+  Optimize-VHD -Path "$VHD" -Mode Full        # needs Hyper-V module + admin
+  #   ...or, without Hyper-V:
+  #   diskpart
+  #     select vdisk file="$VHD"
+  #     attach vdisk readonly
+  #     compact vdisk
+  #     detach vdisk
+  #     exit
+
+Then reopen WSL and re-run 'wsl-compact' to confirm the gap closed.
+EOF
+
+[ "${SPARSE:-0}" -gt 0 ] \
+  && printf "\n\033[2mdetected WSL %s — --set-sparse is supported.\033[0m\n" "$WSLVER" \
+  || printf "\n\033[33mnote: WSL 2.0+ is needed for --set-sparse; skip step 1 on older builds.\033[0m\n"
+printf "\n\033[2mTip: run 'wsl-reclaim' BEFORE compacting so you are not compacting garbage.\033[0m\n"

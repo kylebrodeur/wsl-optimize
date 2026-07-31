@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# capmem — run a command inside a memory-capped systemd scope, so a runaway
+# process fleet is killed by its own cgroup instead of taking down the WSL VM.
+#
+# Why this exists: WSL2 gets a fixed slice of host RAM. When it is exhausted the
+# kernel OOM killer ranks by oom_score_adj — and session plumbing (dbus 200,
+# systemd-user 100) outranks the actual hogs (node, 0). So the kernel PROTECTS
+# the memory hogs and dismantles your session, taking the whole VM with it, with
+# no error surfaced to the editor. Confining work to a cgroup means the OOM is
+# contained: the runaway dies, the VM lives.
+#
+# Usage:
+#   capmem <command> [args...]
+#   CAPMEM_MAX=4G capmem <command>        # override for one run
+#   capmem --status                       # show current limits + live scopes
+#
+# Env: CAPMEM_MAX (default 10G), CAPMEM_HIGH (8G), CAPMEM_TASKS (1024)
+set -uo pipefail
+
+MAX="${CAPMEM_MAX:-10G}"
+HIGH="${CAPMEM_HIGH:-8G}"
+TASKS="${CAPMEM_TASKS:-1024}"
+
+usage(){ sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  --status)
+    printf "\033[1mcapmem\033[0m  MemoryMax=%s  MemoryHigh=%s  TasksMax=%s\n" "$MAX" "$HIGH" "$TASKS"
+    ctl="/sys/fs/cgroup/user.slice/user-$(id -u).slice/cgroup.controllers"
+    if [ -r "$ctl" ] && grep -q memory "$ctl"; then
+      printf "  \033[32m✓\033[0m memory controller delegated\n"
+    else
+      printf "  \033[31m✗\033[0m memory controller NOT delegated — limits cannot be enforced\n"; exit 1
+    fi
+    printf "\n\033[1mLive capmem scopes\033[0m\n"
+    systemctl --user list-units --type=scope --no-legend 2>/dev/null \
+      | grep -E 'run-.*\.scope' | head -10 | sed 's/^/  /' || printf "  (none)\n"
+    exit 0 ;;
+  "") printf "capmem: no command given\n\n" >&2; usage >&2; exit 2 ;;
+esac
+
+if ! command -v systemd-run >/dev/null 2>&1; then
+  # No systemd (rare on modern WSL): run unconfined rather than refusing to work.
+  printf "\033[33mcapmem: systemd-run unavailable — running WITHOUT a memory cap\033[0m\n" >&2
+  exec "$@"
+fi
+
+# --scope keeps the command in the caller's context, so TTY and environment are
+# preserved (safe for interactive tools). --collect stops a killed scope from
+# lingering as a failed unit, which would leave systemd permanently "degraded".
+exec systemd-run --user --scope --quiet --collect \
+  -p MemoryMax="$MAX" \
+  -p MemoryHigh="$HIGH" \
+  -p TasksMax="$TASKS" \
+  -- "$@"

@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# memguard — the bounded-automation layer. Runs on a systemd timer, checks
+# memory and disk against thresholds, and acts only in the SAFE tier.
+#
+# This is not a replacement for earlyoom — it is the layer above it. earlyoom
+# reacts in the last seconds before a kernel OOM by killing something. memguard
+# runs periodically and tries to make that moment never arrive: it reclaims
+# caches, and tells you when pressure is building. It never kills a process and
+# never runs a destructive prune unattended.
+#
+# Usage: memguard [--once] [--verbose]
+set -uo pipefail
+
+WARN_MEM_PCT="${WARN_MEM_PCT:-15}"   # act when available RAM drops below this %
+WARN_SWAP_PCT="${WARN_SWAP_PCT:-50}" # ...and free swap below this %
+WARN_DISK_GB="${WARN_DISK_GB:-20}"   # act below this many GB free inside WSL
+CRIT_DISK_GB="${CRIT_DISK_GB:-10}"
+LOG="${MEMGUARD_LOG:-$HOME/.local/state/wsl-optimize/memguard.log}"
+VERBOSE=0
+for a in "$@"; do case "$a" in --verbose|-v) VERBOSE=1 ;; --once) ;; esac; done
+
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+log(){ printf '%s\t%s\n' "$(date -Is)" "$1" >> "$LOG"; [ "$VERBOSE" -eq 1 ] && printf '%s\n' "$1"; }
+
+# Windows toast — WSL has no notification daemon of its own. Non-blocking; if it
+# fails (no interop, session not interactive) the reclaim still runs and logs.
+notify(){
+  local title="$1" msg="$2"
+  local ps=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+  [ -x "$ps" ] || return 0
+  "$ps" -NoProfile -Command "
+    [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime];
+    \$t=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(
+        [Windows.UI.Notifications.ToastTemplateType]::ToastText02);
+    \$n=\$t.GetElementsByTagName('text');
+    \$n.Item(0).AppendChild(\$t.CreateTextNode('$title')) | Out-Null;
+    \$n.Item(1).AppendChild(\$t.CreateTextNode('$msg')) | Out-Null;
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('WSL').Show(
+        [Windows.UI.Notifications.ToastNotification]::new(\$t));
+  " >/dev/null 2>&1 || true
+}
+
+# ── memory ───────────────────────────────────────────────────────────────────
+read -r mt ma < <(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print t, a}' /proc/meminfo)
+read -r st sf < <(awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{print t, f}' /proc/meminfo)
+mem_pct=$(( ma * 100 / (mt>0?mt:1) ))
+swap_pct=100; [ "${st:-0}" -gt 0 ] && swap_pct=$(( sf * 100 / st ))
+
+# Both conditions, deliberately: swap filling alone is normal, and RAM pressure
+# alone is what page cache is for. Only together do they predict a kernel OOM.
+if [ "$mem_pct" -le "$WARN_MEM_PCT" ] && [ "$swap_pct" -le "$WARN_SWAP_PCT" ]; then
+  log "PRESSURE mem_avail=${mem_pct}% swap_free=${swap_pct}% — running safe reclaim"
+  command -v wsl-reclaim >/dev/null 2>&1 && wsl-reclaim --quiet >>"$LOG" 2>&1
+  top=$(ps -eo comm,rss --no-headers | awk '{c[$1]+=$2} END{for(k in c) printf "%d %s\n",c[k],k}' \
+        | sort -rn | head -3 | awk '{printf "%s(%dMB) ", $2, $1/1024}')
+  log "top consumers: $top"
+  notify "WSL memory pressure" "avail ${mem_pct}%, swap free ${swap_pct}%. Safe reclaim ran. Top: $top"
+else
+  [ "$VERBOSE" -eq 1 ] && log "ok mem_avail=${mem_pct}% swap_free=${swap_pct}%"
+fi
+
+# ── disk (inside WSL) ────────────────────────────────────────────────────────
+free_gb=$(df -BG / | awk 'NR==2{gsub("G","",$4); print $4}')
+if [ "${free_gb:-999}" -le "$CRIT_DISK_GB" ]; then
+  log "DISK CRITICAL ${free_gb}GB free — safe reclaim + manual action needed"
+  command -v wsl-reclaim >/dev/null 2>&1 && wsl-reclaim --quiet >>"$LOG" 2>&1
+  notify "WSL disk critical" "${free_gb} GB free. Run: wslreport, then wsl-reclaim --deep --dry-run"
+elif [ "${free_gb:-999}" -le "$WARN_DISK_GB" ]; then
+  log "DISK LOW ${free_gb}GB free — running safe reclaim"
+  command -v wsl-reclaim >/dev/null 2>&1 && wsl-reclaim --quiet >>"$LOG" 2>&1
+  notify "WSL disk low" "${free_gb} GB free. Safe caches reclaimed."
+fi
+
+exit 0

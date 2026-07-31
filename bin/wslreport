@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# wslreport — read-only "where did my memory and disk go?" for a WSL2 box that
+# runs fleets of AI coding agents. Touches nothing; deletes nothing.
+#
+# WSL2 has TWO silent aggregate failures, and this reports both:
+#   memory — the kernel OOM killer reaps session plumbing (dbus/systemd-user,
+#            oom_score_adj 100-200) *before* the actual hogs (adj 0), so the VM
+#            dies with no error surfaced anywhere.
+#   disk   — the ext4.vhdx only ever GROWS. Deleting files inside WSL does not
+#            return space to Windows, so "df says I have room" can coexist with
+#            a host disk that is full.
+set -uo pipefail
+
+b(){ printf "\n\033[1m%s\033[0m\n" "$1"; }
+row(){ printf "  %-34s %s\n" "$1" "$2"; }
+warn(){ printf "  \033[33m!\033[0m %s\n" "$1"; }
+ok(){ printf "  \033[32m✓\033[0m %s\n" "$1"; }
+dim(){ printf "  \033[2m%s\033[0m\n" "$1"; }
+hasw(){ [ -x /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe ]; }
+ps1(){ /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "$1" 2>/dev/null | tr -d '\r'; }
+
+printf "\033[1mwslreport\033[0m  %s  (read-only)\n" "$(date '+%Y-%m-%d %H:%M')"
+
+# ─── memory ──────────────────────────────────────────────────────────────────
+b "Memory"
+read -r _ mt mu _ _ _ ma < <(free -m | awk 'NR==2')
+read -r _ st su _        < <(free -m | awk 'NR==3')
+row "RAM"  "$((mt/1024)) GiB total, $((mu/1024)) GiB used, $((ma/1024)) GiB available"
+if [ "${st:-0}" -eq 0 ]; then
+  warn "NO SWAP — an agent fan-out has no cushion; a burst becomes an instant OOM"
+else
+  row "swap" "$((st/1024)) GiB total, $((su/1024)) GiB used"
+  pct=$(( su * 100 / st ))
+  [ "$pct" -ge 60 ] && warn "swap ${pct}% used — memory pressure is real right now"
+fi
+[ "${ma:-0}" -lt 2048 ] && warn "under 2 GiB available — reclaim or reduce agent concurrency"
+
+# What would the OOM killer actually take? Biggest RSS consumers, grouped.
+b "Top memory consumers (grouped by command)"
+ps -eo comm,rss --no-headers 2>/dev/null \
+ | awk '{c[$1]+=$2; n[$1]++} END {for (k in c) printf "%d\t%d\t%s\n", c[k], n[k], k}' \
+ | sort -rn | head -8 \
+ | while IFS=$'\t' read -r kb cnt cmd; do
+     row "$cmd (x$cnt)" "$(( kb / 1024 )) MiB"
+   done
+dim "aggregate is the danger: no single process looks guilty"
+
+# ─── OOM history ─────────────────────────────────────────────────────────────
+b "OOM history"
+if [ -d /var/log/journal ]; then
+  ok "journald is persistent — previous boots are readable"
+  n=$(journalctl --no-pager 2>/dev/null | grep -cE "Out of memory: Killed process" || true)
+  if [ "${n:-0}" -gt 0 ]; then
+    warn "$n OOM kill(s) recorded"
+    journalctl --no-pager 2>/dev/null | grep -E "Out of memory: Killed process" \
+      | tail -3 | sed 's/.*Killed process/    killed process/' | cut -c1-100
+    dim "forensics: journalctl --list-boots, then journalctl -b -1 | grep -E 'oom-kill|Free swap'"
+  else
+    ok "no OOM kills in the retained journal"
+  fi
+else
+  warn "journald is VOLATILE — a crash erases its own evidence (see wsl-optimize-doctor)"
+fi
+
+# ─── the invisible disk ──────────────────────────────────────────────────────
+b "Disk — inside WSL"
+df -h / | awk 'NR==2{printf "  %-34s %s used of %s (%s), %s free\n","/",$3,$2,$5,$4}'
+
+b "Disk — the vhdx (what Windows actually sees)"
+if hasw; then
+  used_gb=$(df -BG / | awk 'NR==2{gsub("G","",$3); print $3}')
+  out=$(ps1 "Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' | ForEach-Object { \$p=Get-ItemProperty \$_.PSPath; \$v=Join-Path (\$p.BasePath -replace '^\\\\\\\\\?\\\\','') 'ext4.vhdx'; if (Test-Path \$v) { '{0}|{1:N1}' -f \$p.DistributionName, ((Get-Item \$v).Length/1GB) } }")
+  if [ -n "$out" ]; then
+    while IFS='|' read -r distro sz; do
+      [ -z "$distro" ] && continue
+      row "$distro ext4.vhdx" "${sz} GB on disk"
+      if [ "$distro" = "${WSL_DISTRO_NAME:-}" ] && [ -n "$used_gb" ]; then
+        slack=$(awk -v a="$sz" -v b="$used_gb" 'BEGIN{printf "%.0f", a-b}')
+        if [ "${slack:-0}" -ge 5 ]; then
+          warn "~${slack} GB is trapped in the vhdx — deleting files inside WSL will NOT return it"
+          dim "reclaim it with: wsl-compact   (needs a WSL shutdown; never automated)"
+        else
+          ok "vhdx is close to actual usage — little trapped space"
+        fi
+      fi
+    done <<< "$out"
+  else
+    dim "could not read the vhdx size from the registry"
+  fi
+else
+  dim "Windows interop unavailable — cannot measure the vhdx from here"
+fi
+
+# ─── regrowing caches ────────────────────────────────────────────────────────
+b "Caches that regrow on every agent run"
+tot=0
+for d in "$HOME/.npm/_cacache" "$HOME/.local/share/pnpm/store" "$HOME/.cache/uv" \
+         "$HOME/.cache/pip" "$HOME/.cache/ms-playwright" "$HOME/.cache/puppeteer" \
+         "$HOME/.bun/install/cache" "$HOME/.cargo/registry" "/var/cache/apt/archives"; do
+  [ -d "$d" ] || continue
+  kb=$(du -sk "$d" 2>/dev/null | cut -f1); [ -z "$kb" ] && continue
+  tot=$((tot+kb))
+  row "${d/#$HOME/\~}" "$(( kb / 1024 )) MiB"
+done
+[ "$tot" -gt 0 ] && printf "  \033[1m%-34s %s\033[0m\n" "reclaimable (safe tier)" "$(( tot / 1024 )) MiB"
+dim "clear with: wsl-reclaim   (safe by construction — these rebuild on demand)"
+
+# ─── review tier ─────────────────────────────────────────────────────────────
+b "Large agent/editor state (REVIEW — never auto-deleted)"
+for d in "$HOME/.vscode-server/data/User/workspaceStorage" "$HOME/.claude/projects" \
+         "$HOME/.vscode-server/extensions" "$HOME/.cache/claude-cli-nodejs"; do
+  [ -d "$d" ] || continue
+  row "${d/#$HOME/\~}" "$(du -sh "$d" 2>/dev/null | cut -f1)  ($(find "$d" -maxdepth 1 -mindepth 1 2>/dev/null | wc -l) entries)"
+done
+dim "prune with evidence only: wsl-reclaim --deep --dry-run"
+
+# ─── journal size ────────────────────────────────────────────────────────────
+if [ -d /var/log/journal ]; then
+  b "Journal"
+  row "on disk" "$(journalctl --disk-usage 2>/dev/null | grep -oE '[0-9.]+[KMG]' | tail -1)"
+  cap=$(grep -iE '^\s*SystemMaxUse' /etc/systemd/journald.conf 2>/dev/null | head -1 | cut -d= -f2)
+  [ -n "$cap" ] && row "cap" "$cap" || warn "no SystemMaxUse cap — defaults to 10% of the filesystem"
+fi
+
+printf "\n\033[2mnothing was modified. next: wsl-optimize-doctor (health) or wsl-reclaim (safe reclaim)\033[0m\n"

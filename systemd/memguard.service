@@ -1,0 +1,14 @@
+[Unit]
+Description=wsl-optimize memory/disk guard (safe tier only)
+Documentation=https://github.com/kylebrodeur/wsl-optimize
+
+[Service]
+Type=oneshot
+# __PATH__ is substituted at install time: systemd user units get a near-empty
+# environment, and every tool inside is guarded by `command -v` anyway.
+Environment=PATH=__PATH__
+ExecStart=__HOME__/.local/bin/memguard --once
+# Never let the guard itself become the memory problem it is watching for.
+MemoryMax=512M
+TasksMax=64
+Nice=10

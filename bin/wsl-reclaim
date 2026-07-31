@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# wsl-reclaim — reclaim disk on a WSL2 box in two tiers.
+#
+#   safe tier (default)  clears caches the owning tool REBUILDS ON DEMAND.
+#                        Safe by construction, not by carefulness: pnpm/uv prune
+#                        only unreferenced packages, npm's _cacache is a
+#                        re-download cache, installed node_modules are untouched.
+#                        It cannot remove something you are using.
+#
+#   --deep               prunes stale agent/editor state, but only with EVIDENCE
+#                        it is disposable: orphaned (its project folder is gone),
+#                        or idle past KEEP_DAYS AND beyond the newest KEEP_RECENT
+#                        AND not held open by any process AND not allowlisted.
+#                        Age alone is a bad signal and is never sufficient.
+#
+# Usage: wsl-reclaim [--deep] [--dry-run] [--yes] [--quiet]
+# Env:   KEEP_DAYS=30  KEEP_RECENT=5   Allowlist: ~/.config/wsl-reclaim/keep.txt
+set -uo pipefail
+
+DEEP=0; DRY=0; YES=0; QUIET=0
+for a in "$@"; do case "$a" in
+  --deep) DEEP=1 ;; --dry-run|-n) DRY=1 ;; --yes|-y) YES=1 ;; --quiet|-q) QUIET=1 ;;
+  -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  *) printf "wsl-reclaim: unknown option %s\n" "$a" >&2; exit 2 ;;
+esac; done
+
+KEEP_DAYS="${KEEP_DAYS:-30}"
+KEEP_RECENT="${KEEP_RECENT:-5}"
+KEEPFILE="$HOME/.config/wsl-reclaim/keep.txt"
+LOG="$HOME/.local/state/wsl-optimize/reclaim.log"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+
+say(){ [ "$QUIET" -eq 1 ] || printf "%s\n" "$1"; }
+hdr(){ [ "$QUIET" -eq 1 ] || printf "\n\033[1m%s\033[0m\n" "$1"; }
+act(){ [ "$QUIET" -eq 1 ] || printf "  \033[32m→\033[0m %s\n" "$1"; }
+skip(){ [ "$QUIET" -eq 1 ] || printf "  \033[2m·\033[0m %s\n" "$1"; }
+
+free_kb(){ df -Pk / | awk 'NR==2{print $4}'; }
+BEFORE=$(free_kb)
+
+run(){ # run <description> <cmd...>
+  local d="$1"; shift
+  if [ "$DRY" -eq 1 ]; then skip "would: $d"; return; fi
+  if "$@" >/dev/null 2>&1; then act "$d"; else skip "$d (failed or nothing to do)"; fi
+}
+
+# ── SAFE TIER ────────────────────────────────────────────────────────────────
+hdr "Safe tier — caches that rebuild on demand"
+
+command -v pnpm >/dev/null 2>&1 && run "pnpm store prune (unreferenced packages only)" pnpm store prune \
+  || skip "pnpm not installed"
+command -v uv   >/dev/null 2>&1 && run "uv cache prune" uv cache prune \
+  || skip "uv not installed"
+command -v npm  >/dev/null 2>&1 && run "npm cache verify (_cacache is a re-download cache)" npm cache verify \
+  || skip "npm not installed"
+command -v bun  >/dev/null 2>&1 && [ -d "$HOME/.bun/install/cache" ] \
+  && run "bun install cache" rm -rf "$HOME/.bun/install/cache" || true
+command -v cargo >/dev/null 2>&1 && command -v cargo-cache >/dev/null 2>&1 \
+  && run "cargo cache --autoclean" cargo cache --autoclean || true
+command -v pip >/dev/null 2>&1 && run "pip cache purge" pip cache purge || true
+
+# apt: needs root, so only offer it when we already have passwordless sudo.
+if [ -d /var/cache/apt/archives ]; then
+  if sudo -n true 2>/dev/null; then
+    run "apt-get clean (downloaded .debs)" sudo -n apt-get clean
+  else
+    skip "apt cache $(du -sh /var/cache/apt/archives 2>/dev/null | cut -f1) — run: sudo apt-get clean"
+  fi
+fi
+
+# journald respects its own retention; vacuum is safe and bounded.
+if [ -d /var/log/journal ]; then
+  if sudo -n true 2>/dev/null; then
+    run "journalctl --vacuum-time=14d" sudo -n journalctl --vacuum-time=14d
+  else
+    skip "journal $(journalctl --disk-usage 2>/dev/null | grep -oE '[0-9.]+[KMG]' | tail -1) — run: sudo journalctl --vacuum-time=14d"
+  fi
+fi
+
+# Stale multishell dirs from Node version managers accumulate one per shell.
+if [ -d "/run/user/$(id -u)/fnm_multishells" ]; then
+  cnt=$(find "/run/user/$(id -u)/fnm_multishells" -maxdepth 1 -mindepth 1 -mmin +120 2>/dev/null | wc -l)
+  [ "$cnt" -gt 0 ] && run "$cnt stale fnm multishell dirs (>2h)" \
+    find "/run/user/$(id -u)/fnm_multishells" -maxdepth 1 -mindepth 1 -mmin +120 -exec rm -rf {} + \
+    || skip "no stale multishell dirs"
+fi
+
+# ── DEEP TIER ────────────────────────────────────────────────────────────────
+if [ "$DEEP" -eq 1 ]; then
+  hdr "Deep tier — stale agent/editor state (evidence required)"
+  [ "$DRY" -eq 0 ] && [ "$YES" -eq 0 ] && {
+    printf "  \033[33mThis deletes state. Run with --dry-run first if you have not.\033[0m\n"
+    printf "  Continue? [y/N] "; read -r r; case "$r" in y|Y) ;; *) say "  aborted"; exit 0 ;; esac
+  }
+
+  inuse(){ command -v lsof >/dev/null 2>&1 && lsof +D "$1" >/dev/null 2>&1; }
+  allowed(){ [ -f "$KEEPFILE" ] && grep -qFf "$KEEPFILE" <<< "$1"; }
+
+  # 1. VS Code workspaceStorage whose referenced folder is GONE. Orphaned is
+  #    proof; age is not. A project you use weekly but not in 30 days stays.
+  WS="$HOME/.vscode-server/data/User/workspaceStorage"
+  if [ -d "$WS" ]; then
+    n=0
+    for d in "$WS"/*/; do
+      [ -d "$d" ] || continue
+      j="$d/workspace.json"; [ -f "$j" ] || continue
+      folder=$(grep -oE '"folder"\s*:\s*"[^"]+"' "$j" 2>/dev/null | head -1 | sed 's/.*"\(file:[^"]*\)".*/\1/')
+      [ -z "$folder" ] && continue
+      p="${folder#file://}"; p=$(printf '%b' "${p//%/\\x}")
+      [ -e "$p" ] && continue                       # project still exists -> keep
+      allowed "$d" && { skip "allowlisted: $(basename "$d")"; continue; }
+      inuse "$d"   && { skip "in use: $(basename "$d")"; continue; }
+      n=$((n+1))
+      if [ "$DRY" -eq 1 ]; then skip "would remove orphaned workspaceStorage $(basename "$d") -> missing $p"
+      else rm -rf "$d" && act "orphaned workspaceStorage $(basename "$d")"; fi
+    done
+    [ "$n" -eq 0 ] && skip "no orphaned workspaceStorage entries"
+  fi
+
+  # 2. Agent transcripts: idle past KEEP_DAYS, beyond the newest KEEP_RECENT.
+  for base in "$HOME/.claude/projects" "$HOME/.cache/claude-cli-nodejs"; do
+    [ -d "$base" ] || continue
+    mapfile -t old < <(find "$base" -maxdepth 1 -mindepth 1 -mtime "+$KEEP_DAYS" -printf '%T@ %p\n' 2>/dev/null \
+                        | sort -rn | tail -n +$((KEEP_RECENT+1)) | cut -d' ' -f2-)
+    [ "${#old[@]}" -eq 0 ] && { skip "$(basename "$base"): nothing older than ${KEEP_DAYS}d beyond newest $KEEP_RECENT"; continue; }
+    for d in "${old[@]}"; do
+      allowed "$d" && { skip "allowlisted: $(basename "$d")"; continue; }
+      inuse "$d"   && { skip "in use: $(basename "$d")"; continue; }
+      if [ "$DRY" -eq 1 ]; then skip "would remove $(basename "$base")/$(basename "$d") (idle >${KEEP_DAYS}d)"
+      else rm -rf "$d" && act "$(basename "$base")/$(basename "$d")"; fi
+    done
+  done
+fi
+
+# ── result ───────────────────────────────────────────────────────────────────
+AFTER=$(free_kb)
+DELTA=$(( (AFTER - BEFORE) / 1024 ))
+[ "$DELTA" -lt 0 ] && DELTA=0
+if [ "$DRY" -eq 1 ]; then
+  say ""; say "dry run — nothing was deleted."
+else
+  printf "\n\033[1mreclaimed ~%s MiB\033[0m  (%s MiB free)\n" "$DELTA" "$(( AFTER / 1024 ))"
+  printf '%s\treclaimed_mib=%s\tdeep=%s\n' "$(date -Is)" "$DELTA" "$DEEP" >> "$LOG"
+fi
+
+# The WSL-specific catch: freeing space INSIDE does not shrink the vhdx.
+if [ "$DRY" -eq 0 ] && [ "$DELTA" -gt 512 ]; then
+  printf "\033[2mnote: this frees space inside WSL. The ext4.vhdx does not shrink on its own —\n"
+  printf "run 'wsl-compact' to return it to Windows.\033[0m\n"
+fi

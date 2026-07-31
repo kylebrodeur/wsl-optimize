@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# wsl-optimize-doctor — verify a WSL2 dev box is set up to survive agent fleets.
+# Read-only. Exits non-zero if anything is off, so it's usable in a check or CI.
+#
+# Every check here encodes a failure that actually happened on a real machine,
+# not a theoretical best practice.
+set -uo pipefail
+
+pass=0; fail=0; warnc=0
+ok(){   printf "  \033[32m✓\033[0m %s\n" "$1"; pass=$((pass+1)); }
+no(){   printf "  \033[31m✗\033[0m %s\n" "$1"; fail=$((fail+1)); }
+wr(){   printf "  \033[33m!\033[0m %s\n" "$1"; warnc=$((warnc+1)); }
+info(){ printf "  \033[2m·\033[0m %s\n" "$1"; }
+hdr(){  printf "\n\033[1m%s\033[0m\n" "$1"; }
+
+hdr "Tools on PATH"
+for t in wslreport wsl-reclaim capmem wsl-optimize-doctor; do
+  p="$(command -v "$t" 2>/dev/null)"
+  { [ -n "$p" ] && [ -x "$p" ]; } && ok "$t → $p" \
+    || no "$t not found — run 'make install' (and put ~/.local/bin on PATH)"
+done
+
+# ── Memory headroom ──────────────────────────────────────────────────────────
+# The original failure: 27 node procs @ ~635 MB exhausted a 15.7 GB VM with
+# 4 GB of swap. Swap is what converts a hard OOM into observable slowness.
+hdr "Memory headroom (.wslconfig)"
+WC=""
+for c in /mnt/c/Users/*/.wslconfig; do [ -f "$c" ] && WC="$c" && break; done
+if [ -z "$WC" ]; then
+  wr "no .wslconfig found — WSL defaults to 50% RAM / 25% swap, untuned"
+else
+  info "using $WC"
+  sw=$(grep -iE '^\s*swap\s*=' "$WC" | tail -1 | cut -d= -f2 | tr -d ' ')
+  [ -n "$sw" ] && ok "swap=$sw configured" || wr "no swap= set — a burst has no cushion"
+  grep -qiE '^\s*autoMemoryReclaim\s*=' "$WC" \
+    && ok "autoMemoryReclaim set (idle memory returns to Windows)" \
+    || wr "autoMemoryReclaim unset — WSL holds its peak allocation"
+  grep -qiE '^\s*sparseVhd\s*=\s*true' "$WC" \
+    && ok "sparseVhd=true (freed space can return to the host)" \
+    || wr "sparseVhd not enabled — the vhdx only ever grows"
+fi
+sw_kb=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo)
+[ "${sw_kb:-0}" -gt 0 ] && ok "swap active: $(( sw_kb / 1024 / 1024 )) GiB" || no "NO active swap"
+
+# ── earlyoom ─────────────────────────────────────────────────────────────────
+# Without --avoid/--prefer the kernel reaps dbus/systemd-user (adj 100-200)
+# before the hogs (adj 0), which kills the whole VM silently.
+hdr "earlyoom (protects the session, targets the hogs)"
+if command -v earlyoom >/dev/null 2>&1; then
+  ok "earlyoom installed"
+  systemctl is-active --quiet earlyoom && ok "earlyoom service active" || no "earlyoom not active"
+  args=$(ps -eo args --no-headers 2>/dev/null | grep '[e]arlyoom' | head -1)
+  case "$args" in
+    *--avoid*) ok "--avoid set (session plumbing protected)" ;;
+    *) no "no --avoid — the OOM killer may reap dbus/systemd before the hogs" ;;
+  esac
+  case "$args" in
+    *--prefer*) ok "--prefer set (memory hogs targeted first)" ;;
+    *) wr "no --prefer — killer picks purely by size" ;;
+  esac
+  [ -n "$args" ] && info "running: ${args#*earlyoom }"
+else
+  no "earlyoom not installed — nothing kills a runaway before the kernel does"
+fi
+
+# ── journald forensics ───────────────────────────────────────────────────────
+hdr "Crash forensics (journald)"
+if [ -d /var/log/journal ]; then
+  ok "journal is persistent — a crash no longer erases its own evidence"
+  grep -qiE '^\s*SystemMaxUse' /etc/systemd/journald.conf 2>/dev/null \
+    && ok "SystemMaxUse capped ($(grep -iE '^\s*SystemMaxUse' /etc/systemd/journald.conf | cut -d= -f2))" \
+    || wr "no SystemMaxUse cap — journald may grow to 10% of the filesystem"
+else
+  no "journal is VOLATILE — every WSL restart erases the crash you need to read"
+fi
+
+# ── cgroup delegation (capmem) ───────────────────────────────────────────────
+hdr "cgroup memory delegation (needed by capmem)"
+ctl="/sys/fs/cgroup/user.slice/user-$(id -u).slice/cgroup.controllers"
+if [ -r "$ctl" ] && grep -q memory "$ctl"; then
+  ok "memory controller delegated — capmem can bound a runaway to its own cgroup"
+else
+  no "memory controller NOT delegated — capmem cannot enforce a limit"
+fi
+
+# ── toolchain integrity ──────────────────────────────────────────────────────
+# A wiped lib/node_modules left `node` working while npm/npx/pnpm became
+# dangling symlinks, so PATH silently fell through to Windows binaries on /mnt/c
+# — every file op crossing the 9P boundary.
+hdr "Toolchain integrity"
+for t in node npm npx pnpm; do
+  p="$(command -v "$t" 2>/dev/null)"
+  if [ -z "$p" ]; then wr "$t not on PATH"; continue; fi
+  case "$p" in
+    /mnt/c/*) no "$t resolves to a WINDOWS binary ($p) — 9P-slow; check your version manager" ;;
+    *) if [ -L "$p" ] && [ ! -e "$p" ]; then
+         no "$t is a DANGLING symlink ($p) — shadows a working copy later in PATH"
+       else ok "$t → $p"; fi ;;
+  esac
+done
+# Dangling links anywhere on PATH shadow working binaries and fail with a
+# confusing "no such file or directory".
+dang=0
+IFS=: read -ra _pd <<< "$PATH"
+for d in "${_pd[@]}"; do
+  [ -d "$d" ] || continue
+  for f in "$d"/*; do [ -L "$f" ] && [ ! -e "$f" ] && dang=$((dang+1)); done 2>/dev/null
+done
+[ "$dang" -eq 0 ] && ok "no dangling symlinks on PATH" || wr "$dang dangling symlink(s) on PATH"
+
+# ── PATH hygiene ─────────────────────────────────────────────────────────────
+hdr "PATH hygiene"
+# grep -c . not wc -l: tr leaves the last field unterminated, so wc undercounts
+n=$(printf '%s' "$PATH" | tr ':' '\n' | grep -c .)
+u=$(printf '%s' "$PATH" | tr ':' '\n' | sort -u | grep -c .)
+[ "$n" -eq "$u" ] && ok "PATH has no duplicates ($n entries)" \
+  || wr "PATH has $((n-u)) duplicate entries — 'typeset -U path' only dedupes ARRAY assignment; add 'path=(\$path)' last in .zshrc"
+miss=$(for d in "${_pd[@]}"; do [ -d "$d" ] || echo "$d"; done | wc -l)
+[ "$miss" -eq 0 ] && ok "all PATH dirs exist" || info "$miss PATH dir(s) do not exist (usually harmless)"
+
+# ── automation ───────────────────────────────────────────────────────────────
+hdr "Automation (systemd user units)"
+for u in memguard.timer wsl-reclaim.timer; do
+  if systemctl --user list-unit-files "$u" >/dev/null 2>&1 && \
+     systemctl --user is-enabled --quiet "$u" 2>/dev/null; then
+    ok "$u enabled"
+  else
+    wr "$u not enabled — run 'make install'"
+  fi
+done
+systemctl --user is-system-running >/dev/null 2>&1 || info "systemd user manager state: $(systemctl --user is-system-running 2>&1)"
+
+# ── agent skills ─────────────────────────────────────────────────────────────
+# Never fetch-and-execute a remote CLI from a health check.
+hdr "Agent skills (optional)"
+if command -v skills >/dev/null 2>&1; then
+  skills list 2>/dev/null | grep -q 'wsl-optimize' \
+    && ok "wsl-optimize skills installed" \
+    || info "not installed — run: npx skills add kylebrodeur/wsl-optimize"
+else
+  info "to check skills across agents run: npx skills list  (fetches the CLI on first use)"
+fi
+
+printf "\n\033[1mwsl-optimize: %d passed, %d warnings, %d failed\033[0m\n" "$pass" "$warnc" "$fail"
+[ "$fail" -eq 0 ]
