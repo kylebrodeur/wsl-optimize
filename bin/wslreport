@@ -19,6 +19,17 @@ dim(){ printf "  \033[2m%s\033[0m\n" "$1"; }
 hasw(){ [ -x /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe ]; }
 ps1(){ /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "$1" 2>/dev/null | tr -d '\r'; }
 
+# A tool with no --help that runs a slow report on any argument is user-hostile,
+# and it made `brew test` hang. Handle it before doing any work.
+case "${1:-}" in
+  -h|--help)
+    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    printf '\nUsage: wslreport            read-only memory + disk + OOM report\n'
+    exit 0 ;;
+  "") ;;
+  *) printf 'wslreport: unknown option %s (try --help)\n' "$1" >&2; exit 2 ;;
+esac
+
 printf "\033[1mwslreport\033[0m  %s  (read-only)\n" "$(date '+%Y-%m-%d %H:%M')"
 
 # ─── memory ──────────────────────────────────────────────────────────────────
