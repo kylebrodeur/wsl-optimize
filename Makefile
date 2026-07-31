@@ -1,4 +1,4 @@
-.PHONY: install uninstall install-skills doctor report reclaim compact lint
+.PHONY: install uninstall install-skills doctor report reclaim compact lint vendor-lib
 
 install:
 	./install.sh
@@ -36,3 +36,9 @@ lint:
 	else \
 		echo "shellcheck not installed — skipping (sudo apt install shellcheck)"; \
 	fi
+
+# Refresh the vendored shared library from agent-machine-lib. Vendored rather
+# than submoduled because this repo promises zero dependencies.
+vendor-lib:
+	@curl -fsSL https://raw.githubusercontent.com/kylebrodeur/agent-machine-lib/main/lib/common.sh \
+		-o lib/common.sh && echo "updated lib/common.sh from agent-machine-lib@main"

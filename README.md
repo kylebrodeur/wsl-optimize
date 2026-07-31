@@ -100,7 +100,7 @@ sparseVhd=true
 # earlyoom — inverts the kernel's instinct to protect the hogs
 sudo apt-get install -y earlyoom
 sudo tee /etc/default/earlyoom >/dev/null <<'EOF'
-EARLYOOM_ARGS="-r 3600 -m 10 -s 40 --avoid '(^|/)(systemd|dbus-daemon|init|sshd|login)$' --prefer '(^|/)(node|python3)$'"
+EARLYOOM_ARGS="-r 3600 -m 10 -s 40 --avoid '(^|/)(systemd|dbus-daemon|init|sshd|login|wsl-gpu-guard)$' --prefer '(^|/)(node|python3)$'"
 EOF
 sudo systemctl restart earlyoom     # NOT `enable --now` — that won't restart a running unit
 ```
@@ -149,6 +149,17 @@ npx skills add kylebrodeur/wsl-optimize          # interactive: pick skills + ag
 npx skills add kylebrodeur/wsl-optimize --list   # list what's available
 make install-skills                              # Claude Code: symlink into ~/.claude/skills
 ```
+
+## Related tools
+
+These solve adjacent problems well; this repo defers to them rather than shipping weaker copies.
+
+| Tool | Why |
+|---|---|
+| [`agent-session-kill`](https://github.com/kylebrodeur/agent-session-kill) | Agent transcript cleanup, done properly: trash-first deletion, protection lists for auth/settings/skills/memory, and coverage of Pi/OMP/Copilot Chat as well as Claude. `wsl-reclaim --deep` **delegates to it when installed** and only falls back to its own conservative pruning otherwise. |
+| [`wsl-gpu-guard`](https://github.com/kylebrodeur/wsl-gpu-guard) | A *third* cause of silent WSL death: on Optimus laptops the dGPU powers off when AC is unplugged, `/dev/dxg` vanishes, and any process holding a CUDA context takes WSL2 down with it. `wsl-optimize-doctor` checks whether it is running and whether earlyoom is configured to protect it. |
+| [`mac-optimize`](https://github.com/kylebrodeur/mac-optimize) | The macOS sibling. Its `worktree-audit` is pure git and runs unmodified here. |
+| [`agent-machine-lib`](https://github.com/kylebrodeur/agent-machine-lib) | The shared bash primitives both this repo and `mac-optimize` vendor. |
 
 ## Not included: git worktree auditing
 

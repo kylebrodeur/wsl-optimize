@@ -37,6 +37,12 @@ WARN
   exit 0
 fi
 
+LIBDIR="$HOME/.local/lib/wsl-optimize"
+echo "Installing shared library → $LIBDIR"
+mkdir -p "$LIBDIR"
+install -m 0644 "$REPO/lib/common.sh" "$LIBDIR/common.sh"
+echo "  common.sh (vendored from agent-machine-lib)"
+
 echo "Installing + enabling systemd user units → $UNITDIR"
 for u in "$REPO"/systemd/*; do
   n="$(basename "$u")"

@@ -59,6 +59,20 @@ if command -v earlyoom >/dev/null 2>&1; then
     *) wr "no --prefer — killer picks purely by size" ;;
   esac
   [ -n "$args" ] && info "running: ${args#*earlyoom }"
+
+  # Other guards that keep WSL alive must not be the first thing sacrificed to
+  # save it. wsl-gpu-guard (GPU hot-removal protection on Optimus laptops) runs
+  # as a user service at oom_score_adj 200 — i.e. near the top of the kill list.
+  for guard in wsl-gpu-guard; do
+    if pgrep -f "$guard" >/dev/null 2>&1; then
+      if printf '%s' "$args" | grep -q "$guard"; then
+        ok "$guard is protected by --avoid"
+      else
+        gp=$(pgrep -f "$guard" | head -1)
+        wr "$guard is running at oom_score_adj=$(cat "/proc/$gp/oom_score_adj" 2>/dev/null) but is NOT in --avoid — add it"
+      fi
+    fi
+  done
 else
   no "earlyoom not installed — nothing kills a runaway before the kernel does"
 fi

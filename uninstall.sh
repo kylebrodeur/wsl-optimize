@@ -23,6 +23,8 @@ for t in wslreport wsl-reclaim wsl-compact capmem memguard wsl-optimize-doctor; 
   [ -f "$BINDIR/$t" ] && rm -f "$BINDIR/$t" && echo "  $t"
 done
 
+rm -rf "$HOME/.local/lib/wsl-optimize" 2>/dev/null && echo "  shared library"
+
 echo
 echo "Left in place (delete manually if you want them gone):"
 echo "  ~/.local/state/wsl-optimize/   logs"

@@ -24,6 +24,13 @@ for a in "$@"; do case "$a" in
   *) printf "wsl-reclaim: unknown option %s\n" "$a" >&2; exit 2 ;;
 esac; done
 
+# Shared primitives (platform detection, guards, safe-tier reclaim). Vendored
+# from agent-machine-lib; refresh with `make vendor-lib`.
+AM_TOOL=wsl-reclaim
+# shellcheck source=../lib/common.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh" 2>/dev/null \
+  || . "$HOME/.local/lib/wsl-optimize/common.sh"
+
 KEEP_DAYS="${KEEP_DAYS:-30}"
 KEEP_RECENT="${KEEP_RECENT:-5}"
 KEEPFILE="$HOME/.config/wsl-reclaim/keep.txt"
@@ -45,37 +52,13 @@ run(){ # run <description> <cmd...>
 }
 
 # ── SAFE TIER ────────────────────────────────────────────────────────────────
+# Package-manager caches behave identically on macOS and WSL2, so this tier
+# lives in the shared library (agent-machine-lib) rather than being duplicated
+# between the two repos. Only the WSL-specific tail stays here.
 hdr "Safe tier — caches that rebuild on demand"
 
-command -v pnpm >/dev/null 2>&1 && run "pnpm store prune (unreferenced packages only)" pnpm store prune \
-  || skip "pnpm not installed"
-command -v uv   >/dev/null 2>&1 && run "uv cache prune" uv cache prune \
-  || skip "uv not installed"
-command -v npm  >/dev/null 2>&1 && run "npm cache verify (_cacache is a re-download cache)" npm cache verify \
-  || skip "npm not installed"
-command -v bun  >/dev/null 2>&1 && [ -d "$HOME/.bun/install/cache" ] \
-  && run "bun install cache" rm -rf "$HOME/.bun/install/cache" || true
-command -v cargo >/dev/null 2>&1 && command -v cargo-cache >/dev/null 2>&1 \
-  && run "cargo cache --autoclean" cargo cache --autoclean || true
-command -v pip >/dev/null 2>&1 && run "pip cache purge" pip cache purge || true
-
-# apt: needs root, so only offer it when we already have passwordless sudo.
-if [ -d /var/cache/apt/archives ]; then
-  if sudo -n true 2>/dev/null; then
-    run "apt-get clean (downloaded .debs)" sudo -n apt-get clean
-  else
-    skip "apt cache $(du -sh /var/cache/apt/archives 2>/dev/null | cut -f1) — run: sudo apt-get clean"
-  fi
-fi
-
-# journald respects its own retention; vacuum is safe and bounded.
-if [ -d /var/log/journal ]; then
-  if sudo -n true 2>/dev/null; then
-    run "journalctl --vacuum-time=14d" sudo -n journalctl --vacuum-time=14d
-  else
-    skip "journal $(journalctl --disk-usage 2>/dev/null | grep -oE '[0-9.]+[KMG]' | tail -1) — run: sudo journalctl --vacuum-time=14d"
-  fi
-fi
+emit(){ case "$1" in ACTION) act "$2" ;; *) skip "$2" ;; esac; }
+am_reclaim_caches "$DRY" emit
 
 # Stale multishell dirs from Node version managers accumulate one per shell.
 if [ -d "/run/user/$(id -u)/fnm_multishells" ]; then
@@ -117,7 +100,12 @@ if [ "$DEEP" -eq 1 ]; then
     [ "$n" -eq 0 ] && skip "no orphaned workspaceStorage entries"
   fi
 
-  # 2. Agent transcripts: idle past KEEP_DAYS, beyond the newest KEEP_RECENT.
+  # 2. Agent transcripts. agent-session-kill does this better (trash-first,
+  #    protection lists for auth/settings/skills, covers Pi/OMP/Copilot too), so
+  #    defer to it when present rather than shipping a weaker duplicate.
+  if am_have_agent_session_kill; then
+    skip "agent transcripts: delegating to agent-session-kill (run it directly)"
+  else
   for base in "$HOME/.claude/projects" "$HOME/.cache/claude-cli-nodejs"; do
     [ -d "$base" ] || continue
     mapfile -t old < <(find "$base" -maxdepth 1 -mindepth 1 -mtime "+$KEEP_DAYS" -printf '%T@ %p\n' 2>/dev/null \
@@ -130,6 +118,8 @@ if [ "$DEEP" -eq 1 ]; then
       else rm -rf "$d" && act "$(basename "$base")/$(basename "$d")"; fi
     done
   done
+  am_suggest_session_cleanup
+  fi
 fi
 
 # ── result ───────────────────────────────────────────────────────────────────

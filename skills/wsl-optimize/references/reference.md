@@ -58,7 +58,7 @@ Swap matters more than memory. Raising RAM moves the cliff; swap changes the *sh
 ```bash
 sudo apt-get install -y earlyoom
 sudo tee /etc/default/earlyoom >/dev/null <<'EOF'
-EARLYOOM_ARGS="-r 3600 -m 10 -s 40 --avoid '(^|/)(systemd|dbus-daemon|init|sshd|login)$' --prefer '(^|/)(node|python3)$'"
+EARLYOOM_ARGS="-r 3600 -m 10 -s 40 --avoid '(^|/)(systemd|dbus-daemon|init|sshd|login|wsl-gpu-guard)$' --prefer '(^|/)(node|python3)$'"
 EOF
 sudo systemctl restart earlyoom
 ```
