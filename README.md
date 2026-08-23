@@ -28,24 +28,16 @@ Both have the same shape as the macOS disk problem: **aggregate, invisible, no s
 
 ## Install
 
-**Homebrew** (WSL2 (via Linuxbrew)):
-
-```bash
-brew install kylebrodeur/tap/wsl-optimize
-```
-
-Homebrew installs the tools and the shared library, but does **not** manage the
-scheduled automation (it needs per-user paths). `brew info wsl-optimize` prints the exact
-commands, or use the clone method below to have `install.sh` do it.
-
-**From a clone** — also sets up the automation:
-
 ```bash
 git clone https://github.com/kylebrodeur/wsl-optimize.git
 cd wsl-optimize
-make install
-make doctor
+make install          # deploy tools to ~/.local/bin + systemd user timers
+make doctor           # verify the install AND the host's posture
 ```
+
+Pure clone-and-`make` — no tap, no package manager. `install.sh` copies the
+tools into `~/.local/bin`, vendors the shared library, and sets up the systemd
+user timers. Re-running it is safe.
 
 ## Quickstart
 
