@@ -40,20 +40,22 @@ lint:
 		echo "shellcheck not installed — skipping (sudo apt install shellcheck)"; \
 	fi
 
-# Refresh the vendored shared library from agent-machine-lib. Vendored rather
-# than submoduled because this repo promises zero dependencies.
+# Refresh the vendored shared library + shared tools from agent-machine-lib.
+# Vendored rather than submoduled because this repo promises zero dependencies.
 vendor-lib:
 	@set -e; \
 	sha=$$(git ls-remote https://github.com/kylebrodeur/agent-machine-lib.git refs/heads/main | awk '{print $$1}'); \
 	test -n "$$sha"; \
 	tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
-	curl -fsSL "https://raw.githubusercontent.com/kylebrodeur/agent-machine-lib/$$sha/lib/common.sh" \
-		-o "$$tmp/common.sh"; \
-	curl -fsSL "https://raw.githubusercontent.com/kylebrodeur/agent-machine-lib/$$sha/bin/worktree-audit" \
-		-o "$$tmp/worktree-audit"; \
-	chmod +x "$$tmp/worktree-audit"; \
-	mv "$$tmp/common.sh" lib/common.sh; \
-	mv "$$tmp/worktree-audit" bin/worktree-audit; \
+	for f in lib/common.sh bin/worktree-audit bin/browser-guard; do \
+		mkdir -p "$$tmp/$$(dirname "$$f")"; \
+		curl -fsSL "https://raw.githubusercontent.com/kylebrodeur/agent-machine-lib/$$sha/$$f" \
+			-o "$$tmp/$$f"; \
+	done; \
+	chmod +x "$$tmp/bin/worktree-audit" "$$tmp/bin/browser-guard"; \
+	mv "$$tmp/lib/common.sh" lib/common.sh; \
+	mv "$$tmp/bin/worktree-audit" bin/worktree-audit; \
+	mv "$$tmp/bin/browser-guard" bin/browser-guard; \
 	printf '%s\n' "$$sha" > lib/.vendored-from; \
-	echo "refreshed lib/common.sh + bin/worktree-audit from agent-machine-lib@$$sha"
+	echo "refreshed lib/common.sh + bin/{worktree-audit,browser-guard} from agent-machine-lib@$$sha"
