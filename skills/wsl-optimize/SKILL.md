@@ -1,7 +1,7 @@
 ---
 name: wsl-optimize
-description: Diagnose and fix memory and disk exhaustion on a WSL2 dev machine that runs many AI coding agents. Use when WSL feels slow, runs out of memory or disk, when VS Code disconnects from WSL or the distro shuts down with no error, when the user says "WSL crashed", "WSL keeps dying", "free up space", "what's using my memory", "reclaim disk", "compact the vhdx", or for routine maintenance. Drives the wslreport, wsl-reclaim, wsl-compact, capmem, and wsl-optimize-doctor command-line tools with a safety-first workflow.
-compatibility: Requires WSL2 with systemd enabled and the wsl-optimize tools on PATH (wslreport, wsl-reclaim, wsl-compact, capmem, wsl-optimize-doctor). Install from the wsl-optimize repo (see the wsl-optimize-setup skill).
+description: Diagnose and fix memory and disk exhaustion on a WSL2 dev machine that runs many AI coding agents. Use when WSL feels slow, runs out of memory or disk, when VS Code disconnects from WSL or the distro shuts down with no error, when the user says "WSL crashed", "WSL keeps dying", "free up space", "what's using my memory", "reclaim disk", "compact the vhdx", "stop playwright downloading chromium", or for routine maintenance. Drives the wslreport, wsl-reclaim, browser-guard, wsl-compact, capmem, and wsl-optimize-doctor command-line tools with a safety-first workflow.
+compatibility: Requires WSL2 with systemd enabled and the wsl-optimize tools on PATH (wslreport, wsl-reclaim, browser-guard, wsl-compact, capmem, wsl-optimize-doctor). Install from the wsl-optimize repo (see the wsl-optimize-setup skill).
 license: MIT
 metadata:
   author: kylebrodeur
@@ -40,6 +40,15 @@ wsl-reclaim
 ```
 
 Clears only caches the owning tool rebuilds on demand. **Safe by construction**, not by carefulness: `pnpm store prune`/`uv cache prune` remove only unreferenced packages, npm's `_cacache` is a re-download cache, installed `node_modules` are never touched. Run freely.
+
+**Browser caches are the exception — never `rm -rf` them to free space.** A Playwright/Puppeteer browser is a pinned *binary*, so deleting the cache frees nothing: the next test run re-downloads the same hundreds of MB. `wsl-reclaim` prunes these revision-by-revision (superseded only, never one an installed `playwright-core` pins). To stop the download entirely, serve every repo from one shared directory:
+
+```
+browser-guard env            # the shell exports to add to your rc
+browser-guard adopt          # materialise every revision the installed repos pin
+browser-guard check          # assert every pinned revision is satisfied
+browser-guard gc --dry-run   # superseded revisions + agent-browser's orphans
+```
 
 ## 3. Deeper reclaim — ALWAYS dry-run first
 

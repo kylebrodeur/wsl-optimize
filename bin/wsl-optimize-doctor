@@ -14,7 +14,7 @@ info(){ printf "  \033[2m·\033[0m %s\n" "$1"; }
 hdr(){  printf "\n\033[1m%s\033[0m\n" "$1"; }
 
 hdr "Tools on PATH"
-for t in wslreport wsl-reclaim wsl-compact capmem worktree-audit wsl-optimize-doctor; do
+for t in wslreport wsl-reclaim browser-guard wsl-compact capmem worktree-audit wsl-optimize-doctor; do
   p="$(command -v "$t" 2>/dev/null)"
   { [ -n "$p" ] && [ -x "$p" ]; } && ok "$t → $p" \
     || no "$t not found — run 'make install' (and put ~/.local/bin on PATH)"
